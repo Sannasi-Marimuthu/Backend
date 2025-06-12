@@ -154,8 +154,12 @@ router.get(
   GetController.PropertyRatingsAndReveiws
 );
 router.get("/getRoomTypeDetails", GetController.GetRoomType);
-
 router.get("/getPaymentPage", GetController.GetPaymentPageDetails);
+router.get("/getHotelList", GetController.GetHotelList);
+
+//
+router.get("/getMealTypes", GetController.GetMealType); 
+
 
 router.post("/approval", upload.any(), async (req, res) => {
   let tempFiles = [];

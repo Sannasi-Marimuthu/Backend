@@ -48,7 +48,7 @@ const WebRoomAmenities = require("../Schema/Web/RoomAmenities");
 const WebMealPackage = require("../Schema/Web/MealPackage");
 const WebMealPrice = require("../Schema/Web/MealPrice");
 const WebGuestType = require("../Schema/Web/GuestType");
-const WebMealType = require("../Schema/Web/MealTypes");
+const MealType = require("../Schema/Web/MealTypes");
 const File = require("../Schema/FileSchema");
 
 const Get = async (req, res) => {
@@ -191,29 +191,6 @@ const Get = async (req, res) => {
         console.log("checkinCodes");
         console.log(checkinCodes);
 
-        //---------------------------------------------------------------------------------------------
-        // const checkout1 = await Inventory.aggregate([
-        //   {
-        //     $match: {
-        //       PropertyCode: { $in: checkinCodes },
-        //       AvailableDate: checkout,
-        //       AvailableRooms: { $gt: 0 },
-        //     },
-        //   },
-        //   {
-        //     $project: {
-        //       PropertyCode: 1,
-        //       AvailableRooms: 1,
-        //     },
-        //   },
-        // ]);
-
-        // const checkoutCodes = checkout1.map((p) => p.PropertyCode);
-
-        // console.log("checkout1",checkout1);
-        // console.log(checkout1);
-        // ---------------------------------------------------------------------------------------------
-
         // Aggregate to find all room types for the properties
         const roomtypes = await Roomtype.aggregate([
           {
@@ -283,14 +260,6 @@ const Get = async (req, res) => {
             },
           },
         ]);
-        // console.log("images");
-        // console.log(images);
-
-        // console.log("PriceRange");
-        // console.log(PriceRange);
-
-        //   console.log("aaaaaaaaa")
-        // console.log(priceConditions)
 
         // const priceFilters = await Rate.aggregate([
         //   {
@@ -309,8 +278,6 @@ const Get = async (req, res) => {
         //     },
         //   },
         // ]);
-        // console.log("priceFilters");
-        // console.log(priceFilters);
 
         // Now merge the data
         mergedData = checkin1.map((property) => {
@@ -989,10 +956,12 @@ const Get = async (req, res) => {
     } else if (type === "WebGuestType") {
       data = await WebGuestType.find();
       res.status(200).json(data);
-    } else if (type === "WebMealType") {
-      data = await WebMealType.find();
-      res.status(200).json(data);
-    } else if (type === "ImageCategory") {
+    } 
+    // else if (type === "WebMealType") {
+    //   data = await WebMealType.find();
+    //   res.status(200).json(data);
+    // } 
+    else if (type === "ImageCategory") {
       data = await ImageCategory.find();
       res.status(200).json(data);
     }
@@ -1029,6 +998,263 @@ const Get = async (req, res) => {
   }
 };
 
+
+const GetHotelList = async (req, res) => {
+  try {
+    const {
+      propertyType,
+      roomAmenities,
+      StarRating,
+      Price
+    } = req.query;
+
+    // Convert query params into arrays
+    const propertyTypeFilter = propertyType ? propertyType.split(",") : [];
+    const roomAmenitiesFilter = roomAmenities ? roomAmenities.split(",") : [];
+
+    let ratingsArray = [];
+    if (StarRating) {
+      ratingsArray = typeof StarRating === "string"
+        ? StarRating.includes(",")
+          ? StarRating.split(",").map(r => parseInt(r.replace("stars", "")))
+          : [parseInt(StarRating.replace("stars", ""))]
+        : [];
+
+      if (ratingsArray.some(r => isNaN(r))) {
+        return res.status(400).json({
+          error: "Invalid StarRating format. Use '1stars' or '1stars,2stars'"
+        });
+      }
+    }
+
+    // Parse price ranges
+    let priceRanges = [];
+    if (Price) {
+      priceRanges = Price.split(",").map(range => {
+        const [min, max] = range.split("-").map(Number);
+        if (isNaN(min) || isNaN(max)) {
+          throw new Error("Invalid Price format. Use '0-2500,2500-5000'");
+        }
+        return { min, max };
+      });
+    }
+
+    // STEP 1: Fetch all properties
+    let properties = await Property.aggregate([
+      {
+        $project: {
+          Propertycode: 1,
+          Propertytype: 1,
+          Propertyname: 1,
+          From: 1,
+          Bestroute: 1,
+          RatingId: 1,
+          Area: 1,
+          Rating: 1
+        }
+      }
+    ]);
+
+    if (!properties.length) {
+      return res.status(404).json({ error: "No properties found" });
+    }
+
+    let propertyCodes = properties.map(p => p.Propertycode);
+
+    // STEP 2: Apply PropertyType filter
+    if (propertyTypeFilter.length > 0) {
+      properties = properties.filter(p => propertyTypeFilter.includes(p.Propertytype));
+      propertyCodes = properties.map(p => p.Propertycode);
+    }
+
+    // STEP 3: Amenities filter
+    let amenitiesData = [];
+    if (roomAmenitiesFilter.length > 0) {
+      const normalizedAmenities = roomAmenitiesFilter.map(a => a.replace(/\s+/g, "").toLowerCase());
+
+      amenitiesData = await AmenitiesMaster.aggregate([
+        { $match: { PropertyCode: { $in: propertyCodes } } },
+        {
+          $addFields: {
+            filteredAmenities: {
+              $filter: {
+                input: { $objectToArray: "$$ROOT" },
+                cond: {
+                  $and: [
+                    {
+                      $in: [
+                        {
+                          $toLower: {
+                            $replaceAll: {
+                              input: "$$this.k",
+                              find: " ",
+                              replacement: "",
+                            }
+                          }
+                        },
+                        normalizedAmenities
+                      ]
+                    },
+                    { $eq: ["$$this.v", "yes"] }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          $match: {
+            $expr: {
+              $gte: [
+                { $size: "$filteredAmenities" },
+                normalizedAmenities.length
+              ]
+            }
+          }
+        }
+      ]);
+
+      const amenitiesPropertyCodes = amenitiesData.map(a => a.PropertyCode);
+      properties = properties.filter(p => amenitiesPropertyCodes.includes(p.Propertycode));
+      propertyCodes = properties.map(p => p.Propertycode);
+    } else {
+      amenitiesData = await AmenitiesMaster.find({ PropertyCode: { $in: propertyCodes } });
+    }
+
+    // STEP 4: StarRating Filter
+    if (ratingsArray.length > 0) {
+      properties = await Property.aggregate([
+        { $match: { Propertycode: { $in: propertyCodes } } },
+        {
+          $lookup: {
+            from: "ratingsnumbers",
+            localField: "RatingId",
+            foreignField: "RatingId",
+            as: "ratingData"
+          }
+        },
+        { $unwind: { path: "$ratingData", preserveNullAndEmptyArrays: true } },
+        { $match: { "ratingData.Rating": { $in: ratingsArray } } },
+        {
+          $project: {
+            Propertycode: 1,
+            Propertytype: 1,
+            Propertyname: 1,
+            From: 1,
+            Bestroute: 1,
+            RatingId: 1,
+            Area: 1,
+            Rating: "$ratingData.Rating"
+          }
+        }
+      ]);
+
+      propertyCodes = properties.map(p => p.Propertycode);
+    }
+
+    // STEP 5: Fetch RoomTypes & Rates
+    const roomtypes = await Roomtype.aggregate([
+      { $match: { PropertyCode: { $in: propertyCodes } } }
+    ]);
+    const roomCodes = roomtypes.map(r => r.Roomcode);
+
+    let rates = await Rate.aggregate([
+      { $match: { PropertyCode: { $in: propertyCodes }, RoomCode: { $in: roomCodes } } }
+    ]);
+
+    // STEP 5.1: Price filter
+    if (priceRanges.length > 0) {
+      rates = rates.filter(p =>
+        priceRanges.some(range => p.SingleTarrif >= range.min && p.SingleTarrif <= range.max)
+      );
+
+      const priceFilteredPropertyCodes = [...new Set(rates.map(p => p.PropertyCode))];
+      properties = properties.filter(p => priceFilteredPropertyCodes.includes(p.Propertycode));
+      propertyCodes = properties.map(p => p.Propertycode);
+
+      if (!propertyCodes.length) {
+        return res.status(404).json({ error: "No properties found in price range" });
+      }
+    }
+
+    // STEP 6: Images
+    const images = await File.aggregate([
+      { $match: { PropertyCode: { $in: propertyCodes } } }
+    ]);
+
+    // STEP 7: Merge final data
+    const mergedData = properties.map(property => {
+      const propertyCode = property.Propertycode;
+
+      return {
+        categories: [{
+          Category: property.Propertytype,
+          Name: property.Propertyname,
+          PropertyCode: propertyCode,
+          From: property.From,
+          Bestroute: property.Bestroute,
+          RatingId: property.RatingId,
+          Area: property.Area,
+        }],
+        roomtypes: roomtypes.filter(r => r.PropertyCode === propertyCode).map(r => ({
+          Roomtype: r.Displayname,
+          Bedinfo: r.Bedview,
+          Totalrooms: r.Totalrooms,
+          Maxoccupancy: r.Maxoccupancy
+        })),
+        prices: rates.filter(p => p.PropertyCode === propertyCode).map(p => ({
+          Price: p.SingleTarrif
+        })),
+        Amenities: amenitiesData.filter(a => a.PropertyCode === propertyCode).map(a => ({
+          Amenities: a
+        })),
+        images: images.filter(img => img.PropertyCode === propertyCode).map(img => {
+          let imageData = {};
+          if (img.CoverImage?.length) imageData.Coverimage = img.CoverImage;
+          if (img.Others?.length) imageData.Smallimages = img.Others;
+          if (img.PropertyImage?.length) imageData.PropertyImage = img.PropertyImage;
+          return imageData;
+        }).filter(img => Object.keys(img).length > 0)
+      };
+    });
+
+    res.status(200).json(mergedData);
+  } catch (error) {
+    console.error("Error in GetHotelLists:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+
+// const GetWebMealType = async (req, res) => {
+//   try {
+//     const data = await WebMealType.find();
+//     res.status(200).json(data);
+//   } catch (error) {
+//     res.status(500).json({ message: "Server error", error: error.message });
+//   }
+// };
+
+//GetMealType
+const GetMealType = async (req, res) => {
+  try {
+    const { PropertyCode } = req.query;
+
+    if (!PropertyCode) {
+      return res.status(400).json({ message: "PropertyCode is required" });
+    }
+
+    const data = await MealType.find({ PropertyCode });
+
+    res.status(200).json(data);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+
+
 //Hotel Details page:3
 const GetHotelDetails = async (req, res) => {
   try {
@@ -1053,7 +1279,9 @@ const GetHotelDetails = async (req, res) => {
     // ✅ 3. Log actual data found
     console.log("Hotel Data: ", abouthotel);
     if (abouthotel.length === 0) {
-      return res.status(404).json({ message: "No hotel found for this PropertyCode" });
+      return res
+        .status(404)
+        .json({ message: "No hotel found for this PropertyCode" });
     }
 
     const hotel = abouthotel[0];
@@ -1062,12 +1290,22 @@ const GetHotelDetails = async (req, res) => {
 
     // ✅ 4. Extract amenities marked "yes"
     const amenityKeys = [
-      "Barbeque", "Breakfast", "Cafe", "Housekeeping", "LAN",
-      "Washing Machine", "EV Charging Station", "Bonfire Pit",
-      "Prayer Room", "Seating Area", "Terrace"
+      "Barbeque",
+      "Breakfast",
+      "Cafe",
+      "Housekeeping",
+      "LAN",
+      "Washing Machine",
+      "EV Charging Station",
+      "Bonfire Pit",
+      "Prayer Room",
+      "Seating Area",
+      "Terrace",
     ];
 
-    const amenitiesList = amenityKeys.filter(key => amenitiesInfo[key] === "yes");
+    const amenitiesList = amenityKeys.filter(
+      (key) => amenitiesInfo[key] === "yes"
+    );
 
     // ✅ 5. Prepare and send response
     const response = {
@@ -1081,13 +1319,14 @@ const GetHotelDetails = async (req, res) => {
     };
 
     return res.json(response);
-
   } catch (error) {
     console.error("GetHotelDetails Error:", error.message);
-    return res.status(500).json({ message: "Internal Server Error", error: error.message });
+    return res
+      .status(500)
+      .json({ message: "Internal Server Error", error: error.message });
   }
 };
-
+// 3rd page
 const PropertyDetails = async (req, res) => {
   const PropertyCode = req.query.PropertyCode;
   const property = await Property.find({ PropertyCode: PropertyCode });
@@ -1096,19 +1335,53 @@ const PropertyDetails = async (req, res) => {
   res.send(property);
 };
 
+// const PropertyImages = async (req, res) => {
+//   const PropertyCode = req.query.PropertyCode;
+//   const images = await File.find({
+//     PropertyCode: PropertyCode,
+//     PropertyImage: { $exists: true, $not: { $size: 0 } },
+//   });
+//   res.send(images);
+// };
+// 3rd page
 const PropertyImages = async (req, res) => {
-  const PropertyCode = req.query.PropertyCode;
-  // Find only documents where PropertyImage exists and is not empty
-  const images = await File.find({
-    PropertyCode: PropertyCode,
-    PropertyImage: { $exists: true, $not: { $size: 0 } },
-  });
-  res.send(images);
+  try {
+    // const PropertyCode = req.query.PropertyCode;
+
+    // if (!PropertyCode) {
+    //   return res.status(400).json({ error: "PropertyCode is required" });
+    // }
+
+    const images = await File.find({
+      // PropertyCode,
+      $or: [
+        {
+          PropertyImage: {
+            $exists: true,
+            $ne: null,
+            $not: { $size: 0 },
+          },
+        },
+        {
+          // For cases where PropertyImage is stored as a single string (not array)
+          PropertyImage: { $type: "string", $ne: "" },
+        },
+      ],
+    });
+
+    if (!images.length) {
+      return res
+        .status(404)
+        .json({ message: "No images found for this property" });
+    }
+
+    res.json(images);
+  } catch (error) {
+    console.error("Error fetching property images:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 };
-
-
-
-
+// 3rd page
 const PropertyPolicies = async (req, res) => {
   const PropertyCode = req.query.PropertyCode;
   console.log(`PropertyCode:${PropertyCode}`);
@@ -1116,13 +1389,14 @@ const PropertyPolicies = async (req, res) => {
   console.log(Policies);
   res.send(Policies);
 };
-
+// 3rd page
 const PropertyRates = async (req, res) => {
-  const PropertyCode = req.query.PropertyCode;
+  const PropertyCode = req.query.PropertyCode?.trim();
+  console.log("Searching for PropertyCode:", PropertyCode);
   const rates = await Rate.find({ PropertyCode: PropertyCode });
   res.send(rates);
 };
-
+// 3rd page
 const PropertyAmenities = async (req, res) => {
   const PropertyCode = req.query.PropertyCode;
   console.log(`PropertyCode:${PropertyCode}`);
@@ -1130,7 +1404,7 @@ const PropertyAmenities = async (req, res) => {
   console.log(amenities);
   res.send(amenities);
 };
-
+// 3rd page
 const PropertyRatingsAndReveiws = async (req, res) => {
   const PropertyCode = req.query.PropertyCode;
   console.log(`PropertyCode:${PropertyCode}`);
@@ -1138,7 +1412,7 @@ const PropertyRatingsAndReveiws = async (req, res) => {
   console.log(ratings);
   res.send(ratings);
 };
-
+// 4th page
 const GetPaymentPageDetails = async (req, res) => {
   console.log("GetPaymentPageDetails");
   const PropertyCode = req.query.PropertyCode;
@@ -1251,7 +1525,7 @@ const GetPaymentPageDetails = async (req, res) => {
 //   // res.send(mergeddata)
 //   // console.log("mergeddata",mergeddata);
 // };
-
+//3rd page
 const GetRoomType = async (req, res) => {
   try {
     const PropertyCodeData = req.query.PropertyCode;
@@ -1260,12 +1534,16 @@ const GetRoomType = async (req, res) => {
     console.log("PropertyCodeData:", PropertyCodeData);
     console.log("EntryDate:", EntryDate);
 
-    const RoomTypeInfo = await Roomtype.find({ PropertyCode: PropertyCodeData });
+    const RoomTypeInfo = await Roomtype.find({
+      PropertyCode: PropertyCodeData,
+    });
     if (!RoomTypeInfo.length) {
       return res.status(404).json({ message: "No room types found" });
     }
 
-    const RoomCodeArray = RoomTypeInfo.map((item) => item.Roomcode).filter(Boolean);
+    const RoomCodeArray = RoomTypeInfo.map((item) => item.Roomcode).filter(
+      Boolean
+    );
     console.log("RoomCodeArray", RoomCodeArray);
 
     const RateMasterInfo = await Rate.find({
@@ -1278,8 +1556,12 @@ const GetRoomType = async (req, res) => {
     });
 
     const mergedData = RoomTypeInfo.map((roomType) => {
-      const ratePlans = RateMasterInfo.filter((rate) => rate.RoomCode === roomType.Roomcode);
-      const roomImages = RoomImages.filter((img) => img.RoomCode === roomType.Roomcode);
+      const ratePlans = RateMasterInfo.filter(
+        (rate) => rate.RoomCode === roomType.Roomcode
+      );
+      const roomImages = RoomImages.filter(
+        (img) => img.RoomCode === roomType.Roomcode
+      );
 
       return {
         RoomType: roomType,
@@ -1307,4 +1589,6 @@ module.exports = {
   PropertyAmenities,
   PropertyRatingsAndReveiws,
   GetRoomType,
+  GetMealType,
+  GetHotelList
 };
